@@ -390,6 +390,23 @@ Avoid keeping both the user and system gateway units installed at once unless yo
 If you run multiple Hermes installations on the same machine (with different `HERMES_HOME` directories), each gets its own systemd service name. The default `~/.hermes` uses `hermes-gateway`; other installations use `hermes-gateway-<hash>`. The `hermes gateway` commands automatically target the correct service for your current `HERMES_HOME`.
 :::
 
+#### Externally managed or candidate services
+
+By default, `hermes gateway run` refreshes the installed user systemd unit
+at startup. If you manage your own unit or run an isolated candidate beside
+an existing gateway, disable this behavior in that instance's `config.yaml`:
+
+```yaml
+gateway:
+  auto_refresh_service: false
+```
+
+Use the YAML boolean `false` (without quotes). This preserves the installed
+unit's home, executable, environment, and working directory during startup.
+It does not change explicit `hermes gateway install`, `start`, or `restart`
+operations, which can still regenerate the unit. Manage custom units through
+systemd directly instead.
+
 ### macOS (launchd)
 
 ```bash

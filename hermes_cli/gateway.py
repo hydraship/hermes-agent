@@ -3221,7 +3221,11 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     # the exact failure mode the new settings were meant to prevent.
     if supports_systemd_services():
         try:
-            refresh_systemd_unit_if_needed(system=False)
+            # Custom/candidate services must not rewrite the installed unit
+            # with their own HERMES_HOME, checkout, or working directory.
+            gateway_config = read_raw_config().get("gateway") or {}
+            if gateway_config.get("auto_refresh_service", True) is not False:
+                refresh_systemd_unit_if_needed(system=False)
         except Exception:
             pass  # best-effort; don't block gateway startup
     
