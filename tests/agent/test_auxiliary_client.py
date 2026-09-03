@@ -2308,6 +2308,67 @@ class TestCodexAdapterReasoningTranslation:
         assert "reasoning" not in captured
         assert "include" not in captured
 
+    def test_preserves_tool_call_history_and_tool_choice(self):
+        adapter, captured = self._build_adapter()
+
+        adapter.create(
+            messages=[
+                {"role": "system", "content": "Use the supplied tools."},
+                {"role": "user", "content": "List shipments"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "list_shipments",
+                            "arguments": '{"limit":5}',
+                        },
+                    }],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "content": '[{"id":"shipment_1"}]',
+                },
+            ],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "list_shipments",
+                    "description": "List shipments",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice={
+                "type": "function",
+                "function": {"name": "list_shipments"},
+            },
+            parallel_tool_calls=False,
+        )
+
+        assert captured["input"] == [
+            {"role": "user", "content": "List shipments"},
+            {
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "list_shipments",
+                "arguments": '{"limit":5}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": '[{"id":"shipment_1"}]',
+            },
+        ]
+        assert captured["instructions"] == "Use the supplied tools."
+        assert captured["tool_choice"] == {
+            "type": "function",
+            "name": "list_shipments",
+        }
+        assert captured["parallel_tool_calls"] is False
+
     def test_reasoning_default_effort_when_only_enabled_flag(self):
         """extra_body={"reasoning": {}} (truthy enabled by omission) → default 'medium'."""
         adapter, captured = self._build_adapter()
