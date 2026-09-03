@@ -699,6 +699,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self._model_name: str = self._resolve_model_name(
             extra.get("model_name", os.getenv("API_SERVER_MODEL_NAME", "")),
         )
+        self._passthrough: bool = bool(extra.get("passthrough", False))
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
@@ -1014,6 +1015,51 @@ class APIServerAdapter(BasePlatformAdapter):
             gateway_session_key=gateway_session_key,
         )
         return agent
+
+    async def _run_passthrough_completion(self, body: Dict[str, Any]) -> Any:
+        from gateway.api_passthrough import run_chat_completion
+
+        return await run_chat_completion(body)
+
+    @staticmethod
+    def _serialize_passthrough_completion(completion: Any) -> Dict[str, Any]:
+        choice = completion.choices[0]
+        message = choice.message
+        tool_calls = []
+        for call in getattr(message, "tool_calls", None) or []:
+            tool_calls.append({
+                "id": call.id,
+                "type": "function",
+                "function": {
+                    "name": call.function.name,
+                    "arguments": call.function.arguments,
+                },
+            })
+
+        response_message: Dict[str, Any] = {
+            "role": getattr(message, "role", "assistant"),
+            "content": getattr(message, "content", None),
+        }
+        if tool_calls:
+            response_message["tool_calls"] = tool_calls
+
+        usage = getattr(completion, "usage", None)
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:29]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": getattr(completion, "model", "hermes-agent"),
+            "choices": [{
+                "index": 0,
+                "message": response_message,
+                "finish_reason": getattr(choice, "finish_reason", "stop"),
+            }],
+            "usage": {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+            },
+        }
 
     # ------------------------------------------------------------------
     # HTTP Handlers
@@ -1685,6 +1731,26 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
+
+        if self._passthrough:
+            if stream:
+                return web.json_response(
+                    _openai_error(
+                        "Streaming is not supported in API passthrough mode.",
+                        err_type="invalid_request_error",
+                    ),
+                    status=400,
+                )
+            try:
+                completion = await self._run_passthrough_completion(body)
+                response_body = self._serialize_passthrough_completion(completion)
+            except Exception:
+                logger.error("API passthrough completion failed")
+                return web.json_response(
+                    _openai_error("Internal server error", err_type="server_error"),
+                    status=500,
+                )
+            return web.json_response(response_body)
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None

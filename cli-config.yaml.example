@@ -689,6 +689,11 @@ platform_toolsets:
 #     # allowed_chats: ["-1001234567890"]
 #     extra:
 #       disable_link_previews: false  # Set true to suppress Telegram URL previews in bot messages
+#   api_server:
+#     extra:
+#       # Bypass AIAgent and make one subscription-backed Codex request. The
+#       # caller owns the prompt, external tools, and full conversation loop.
+#       passthrough: false
 #
 # Discord-specific settings (config.yaml top-level, not under platforms:):
 #
