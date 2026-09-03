@@ -18,6 +18,7 @@ import os
 import stat
 import time
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -392,13 +393,15 @@ class TestAuth:
 # ---------------------------------------------------------------------------
 
 
-def _make_adapter(api_key: str = "", cors_origins=None) -> APIServerAdapter:
+def _make_adapter(api_key: str = "", cors_origins=None, passthrough: bool = False) -> APIServerAdapter:
     """Create an adapter with optional API key."""
     extra = {}
     if api_key:
         extra["key"] = api_key
     if cors_origins is not None:
         extra["cors_origins"] = cors_origins
+    if passthrough:
+        extra["passthrough"] = True
     config = PlatformConfig(enabled=True, extra=extra)
     return APIServerAdapter(config)
 
@@ -832,6 +835,121 @@ class TestToolsetsEndpoint:
 
 
 class TestChatCompletionsEndpoint:
+    @pytest.mark.asyncio
+    async def test_passthrough_returns_client_tool_calls_without_running_agent(self):
+        adapter = _make_adapter(passthrough=True)
+        provider_response = SimpleNamespace(
+            model="gpt-5.5",
+            choices=[SimpleNamespace(
+                finish_reason="tool_calls",
+                message=SimpleNamespace(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[SimpleNamespace(
+                        id="call_123",
+                        type="function",
+                        function=SimpleNamespace(
+                            name="list_shipments",
+                            arguments='{"limit":5}',
+                        ),
+                    )],
+                ),
+            )],
+            usage=SimpleNamespace(
+                prompt_tokens=120,
+                completion_tokens=15,
+                total_tokens=135,
+            ),
+        )
+        request_body = {
+            "model": "hermes-agent",
+            "messages": [
+                {"role": "system", "content": "Use available tools."},
+                {"role": "user", "content": "List shipments"},
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "list_shipments",
+                    "description": "List shipments",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            "parallel_tool_calls": False,
+            "max_tokens": 2000,
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                adapter,
+                "_run_passthrough_completion",
+                new_callable=AsyncMock,
+                return_value=provider_response,
+            ) as passthrough_call, patch.object(
+                adapter,
+                "_run_agent",
+                new_callable=AsyncMock,
+            ) as agent_call:
+                resp = await cli.post("/v1/chat/completions", json=request_body)
+                assert resp.status == 200
+                data = await resp.json()
+
+        assert data["choices"][0]["message"]["tool_calls"][0]["function"] == {
+            "name": "list_shipments",
+            "arguments": '{"limit":5}',
+        }
+        assert data["usage"] == {
+            "prompt_tokens": 120,
+            "completion_tokens": 15,
+            "total_tokens": 135,
+        }
+        passthrough_call.assert_awaited_once_with(request_body)
+        agent_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_passthrough_rejects_streaming_without_running_provider(self):
+        adapter = _make_adapter(passthrough=True)
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                adapter,
+                "_run_passthrough_completion",
+                new_callable=AsyncMock,
+            ) as passthrough_call:
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 400
+
+        passthrough_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_passthrough_hides_provider_errors(self):
+        adapter = _make_adapter(passthrough=True)
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                adapter,
+                "_run_passthrough_completion",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("sensitive provider response"),
+            ):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": "Hello"}]},
+                )
+                assert resp.status == 500
+                data = await resp.json()
+
+        assert data["error"]["message"] == "Internal server error"
+
     @pytest.mark.asyncio
     async def test_invalid_json_returns_400(self, adapter):
         app = _create_app(adapter)

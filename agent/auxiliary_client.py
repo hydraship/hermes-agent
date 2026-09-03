@@ -628,21 +628,23 @@ class _CodexCompletionsAdapter:
         messages = kwargs.get("messages", [])
         model = kwargs.get("model", self._model)
 
-        # Separate system/instructions from conversation messages.
-        # Convert chat.completions multimodal content blocks to Responses
-        # API format (input_text / input_image instead of text / image_url).
-        instructions = "You are a helpful assistant."
-        input_msgs: List[Dict[str, Any]] = []
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content") or ""
-            if role == "system":
-                instructions = content if isinstance(content, str) else str(content)
-            else:
-                input_msgs.append({
-                    "role": role,
-                    "content": _convert_content_for_responses(content),
-                })
+        # Keep the caller's complete assistant/tool history intact.  The
+        # shared converter also handles multimodal content and the Responses
+        # API's function_call/function_call_output shapes.
+        from agent.codex_responses_adapter import (
+            _chat_messages_to_responses_input,
+            _responses_tools,
+        )
+
+        system_parts = [
+            str(msg.get("content") or "")
+            for msg in messages
+            if isinstance(msg, dict) and msg.get("role") == "system"
+        ]
+        instructions = "\n\n".join(part for part in system_parts if part)
+        if not instructions:
+            instructions = "You are a helpful assistant."
+        input_msgs = _chat_messages_to_responses_input(messages)
 
         resp_kwargs: Dict[str, Any] = {
             "model": model,
@@ -712,20 +714,26 @@ class _CodexCompletionsAdapter:
                     "Auxiliary client: failed to sanitize tool schemas for "
                     "Codex/xAI Responses path: %s", exc,
                 )
-            converted = []
-            for t in tools:
-                fn = t.get("function", {}) if isinstance(t, dict) else {}
-                name = fn.get("name")
-                if not name:
-                    continue
-                converted.append({
-                    "type": "function",
-                    "name": name,
-                    "description": fn.get("description", ""),
-                    "parameters": fn.get("parameters", {}),
-                })
+            converted = _responses_tools(tools)
             if converted:
                 resp_kwargs["tools"] = converted
+
+        tool_choice = kwargs.get("tool_choice")
+        if isinstance(tool_choice, str):
+            resp_kwargs["tool_choice"] = tool_choice
+        elif isinstance(tool_choice, dict):
+            choice_type = str(tool_choice.get("type") or "").strip().lower()
+            function = tool_choice.get("function")
+            if choice_type == "function" and isinstance(function, dict):
+                name = function.get("name")
+                if isinstance(name, str) and name.strip():
+                    resp_kwargs["tool_choice"] = {
+                        "type": "function",
+                        "name": name.strip(),
+                    }
+
+        if "parallel_tool_calls" in kwargs:
+            resp_kwargs["parallel_tool_calls"] = bool(kwargs["parallel_tool_calls"])
 
         # Stream and collect the response
         text_parts: List[str] = []
